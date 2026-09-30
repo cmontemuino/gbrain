@@ -141,7 +141,8 @@ async function pageDatabaseOnlyPublication(engine: SqlEngine, row: WriteRequest,
 
 /** Providers and parsing run before the OS lock and before any publication transaction. */
 export async function preparePageMutation(engine: BrainEngine, row: WriteRequest, _config: GBrainConfig,
-  preparedIntent?: { content: string; expectedRevision: string; tags?: string[] }, signal?: AbortSignal): Promise<PreparedMutation> {
+  preparedIntent?: { content: string; expectedRevision: string; tags?: string[] }, signal?: AbortSignal,
+  options: { allowMissingFile?: boolean } = {}): Promise<PreparedMutation> {
   signal?.throwIfAborted();
   if (!row.intent) throw new OperationError('storage_error', 'A pending write lost its normalized intent.');
   await assertKnowledgePublicationAllowed(engine, row);
@@ -168,7 +169,7 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
     // Tombstones still own their recorded artifact. Purge always attempts its
     // removal before the guarded hard-delete and receipt commit; failure rolls
     // back to the prior row, and replay survives the eventual absence of that row.
-    const file = await prepareFileTarget(engine, row, snapshot, null, undefined, { allowMissing: purge });
+    const file = await prepareFileTarget(engine, row, snapshot, null, undefined, { allowMissing: purge || options.allowMissingFile });
     return { observedRevision, noop, file, ...await pageDatabaseOnlyPublication(engine, row, file), apply: async tx => {
       if (purge) {
         await tx.deletePage(row.slug, source);
@@ -278,7 +279,7 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
     ? await prepareAutomaticLinks(engine,row.slug,ready.parsedPage,row.source_id) : undefined;
   const capture = row.operation === 'capture' && typeof p.capture_path === 'string' && typeof p.capture_file_hash === 'string'
     ? { path: p.capture_path, hash: p.capture_file_hash } : undefined;
-  const file = await prepareFileTarget(engine, row, snapshot, targetDeleted ? null : rendered, undefined, { capture });
+  const file = await prepareFileTarget(engine, row, snapshot, targetDeleted ? null : rendered, undefined, { capture, allowMissing: options.allowMissingFile });
   const mintMode = file && !snapshot?.page.source_path ? await scannerSlugRootMode(engine, row.source_id, file.root) : undefined;
   const sourcePath = file && mintMode ? scannerSourcePath(file.root, file.path, mintMode) : undefined;
   // An inferred mode is pinned with the first origin it mints, so later pages cannot flip the inference (#5610).

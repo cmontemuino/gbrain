@@ -36,7 +36,7 @@ export interface ManagedAtomSession {
   retry?: { runKey: string; checkpointKey: string; expectedCheckpoint: unknown; rows: WriteRequest[]; origin: AtomOrigin };
 }
 export interface AtomIntent extends Record<string, unknown> {
-  kind: 'managed_atom_page' | 'managed_atom_complete';
+  kind: 'managed_atom_page' | 'managed_atom_delete' | 'managed_atom_complete';
   runKey: string;
   origin: AtomOrigin;
   expected_revision?: string;
@@ -65,6 +65,7 @@ export async function managedAtomSession(engine: BrainEngine, sourceId: string, 
     throw new OperationError('permission_denied', 'Atom maintenance requires a source-wide grant.');
   }
   await authorizeWrite(engine, authority, 'put_page', 'atoms/preflight');
+  await authorizeWrite(engine, authority, 'delete_page', 'atoms/preflight');
   const binding = await getWorktreeBinding(engine, sourceId);
   const root = source.local_path || (sourceId === 'default' ? await engine.getConfig('sync.repo_path') : null);
   const writeThrough = !/^(false|0|off|no)$/i.test(await engine.getConfig('sync.write_through') ?? 'true');
@@ -203,8 +204,15 @@ export async function resumeManagedAtoms(engine: BrainEngine, session: ManagedAt
   return true;
 }
 
+export interface ManagedAtomRetirement {
+  slug: string;
+  pageId: number;
+  revision: string;
+}
+
 export async function publishManagedAtoms(engine: BrainEngine, session: ManagedAtomSession, origin: AtomOrigin,
-  atoms: Array<{ slug: string; content: string; links: LinkBatchInput[]; expectedTarget?: { pageId: number | null; revision: string | null } }>, failure?: string): Promise<WriteReceipt[]> {
+  atoms: Array<{ slug: string; content: string; links: LinkBatchInput[]; expectedTarget?: { pageId: number | null; revision: string | null } }>,
+  failure?: string, reviewedRetirements?: ManagedAtomRetirement[]): Promise<WriteReceipt[]> {
   const key = runKey(session, origin);
   const inputs: Array<{ slug: string; pageId: number | null; intent: AtomIntent }> = [];
   for (const atom of atoms) {
@@ -222,6 +230,23 @@ export async function publishManagedAtoms(engine: BrainEngine, session: ManagedA
       ...(session.retry ? { checkpointKey: session.retry.checkpointKey, expectedCheckpoint: session.retry.expectedCheckpoint } : {}),
       ...(target.revision ? { expected_revision: target.revision } : {}), content: atom.content, links: atom.links } as AtomIntent });
   }
+  const originKey = origin.kind === 'page' ? 'source_slug' : 'source_path';
+  const retirements = failure ? [] : reviewedRetirements ?? await engine.executeRaw<ManagedAtomRetirement>(
+    `SELECT slug,id AS "pageId",knowledge_revision::text AS revision FROM pages
+      WHERE source_id=$1 AND type='atom' AND deleted_at IS NULL
+        AND frontmatter->>'${originKey}'=$2
+        AND COALESCE(frontmatter->>'source_hash','')<>$3
+        AND NULLIF(frontmatter->>'imported_from','') IS NULL
+        AND NOT (slug=ANY($4::text[]))`,
+    [session.sourceId, origin.locator, origin.contentHash.slice(0, 16), atoms.map(atom => atom.slug)],
+  );
+  for (const retirement of retirements) {
+    await authorizeWrite(engine, session.authority, 'delete_page', retirement.slug);
+    inputs.push({ slug: retirement.slug, pageId: retirement.pageId, intent: {
+      kind: 'managed_atom_delete', runKey: key, origin, expected_revision: retirement.revision,
+      ...(session.retry ? { checkpointKey: session.retry.checkpointKey, expectedCheckpoint: session.retry.expectedCheckpoint } : {}),
+    } as AtomIntent });
+  }
   const rows = await engine.transaction(async tx => {
     const children: string[] = [];
     const accepted: WriteRequest[] = [];
@@ -234,7 +259,7 @@ export async function publishManagedAtoms(engine: BrainEngine, session: ManagedA
         worktreeId: session.binding?.worktree_id, topologyGeneration: session.binding?.topology_generation,
         slug: input.slug, pageId: input.pageId, requestId, callerIntent: input.intent, intent: input.intent });
       accepted.push(row);
-      if (input.intent.kind === 'managed_atom_page') children.push(row.id);
+      if (input.intent.kind !== 'managed_atom_complete') children.push(row.id);
     }
     return accepted;
   });
@@ -256,7 +281,7 @@ export async function publishManagedAtoms(engine: BrainEngine, session: ManagedA
 
 export async function prepareManagedAtomMutation(engine: BrainEngine, row: WriteRequest, config: GBrainConfig): Promise<PreparedMutation> {
   const p = row.intent as AtomIntent | null;
-  if (!p || !['managed_atom_page', 'managed_atom_complete'].includes(p.kind) || !p.origin || row.authority.remote) {
+  if (!p || !['managed_atom_page', 'managed_atom_delete', 'managed_atom_complete'].includes(p.kind) || !p.origin || row.authority.remote) {
     throw new OperationError('permission_denied', 'Unsupported atom maintenance intent.');
   }
   const validate = async (tx: BrainEngine) => {
@@ -272,18 +297,30 @@ export async function prepareManagedAtomMutation(engine: BrainEngine, row: Write
   };
   await validate(engine);
   const additionalPageKeys = p.origin.kind === 'page' ? [{ sourceId: row.source_id, slug: p.origin.locator }] : [];
+  if (p.kind === 'managed_atom_delete') {
+    await authorizeWrite(engine, row.authority, 'delete_page', row.slug);
+    const prepared = await preparePageMutation(engine, { ...row, operation: 'delete_page' }, config, undefined, undefined, { allowMissingFile: true });
+    return { ...prepared, additionalPageKeys, validate: async tx => {
+      await validate(tx);
+      await authorizeWrite(tx, row.authority, 'delete_page', row.slug);
+      await prepared.validate?.(tx);
+    }, apply: async tx => ({ ...await prepared.apply(tx), atom_run_key: p.runKey, atom_kind: p.kind }) };
+  }
   if (p.kind === 'managed_atom_complete') {
     const targets = await engine.executeRaw<{ slug: string }>('SELECT slug FROM persistence_requests WHERE id=ANY($1::uuid[]) AND source_incarnation=$2::uuid',
       [p.children ?? [], row.source_incarnation]);
     additionalPageKeys.push(...targets.map(target => ({ sourceId: row.source_id, slug: target.slug })));
     return { observedRevision: null, noop: true, additionalPageKeys, validate, apply: async tx => {
       const children = p.children ?? [];
-      const committed = await tx.executeRaw<{ id: string }>(`SELECT r.id FROM persistence_requests r
-        JOIN pages atom ON atom.source_id=r.source_id AND atom.slug=r.slug
-          AND atom.knowledge_revision::text=r.outcome->>'revision' AND atom.deleted_at IS NULL AND atom.type='atom'
+      const committed = await tx.executeRaw<{ id: string; kind: AtomIntent['kind'] }>(`SELECT r.id,
+        COALESCE(r.intent->>'kind',r.outcome->>'atom_kind') AS kind FROM persistence_requests r
+        JOIN pages atom ON atom.source_id=r.source_id AND atom.slug=r.slug AND atom.type='atom'
         WHERE r.id=ANY($1::uuid[]) AND r.source_incarnation=$2::uuid
         AND r.state='committed' AND COALESCE(r.intent->>'runKey',r.outcome->>'atom_run_key')=$3
-        AND COALESCE(r.intent->>'kind',r.outcome->>'atom_kind')='managed_atom_page'`, [children, row.source_incarnation, p.runKey]);
+        AND ((COALESCE(r.intent->>'kind',r.outcome->>'atom_kind')='managed_atom_page'
+          AND atom.knowledge_revision::text=r.outcome->>'revision' AND atom.deleted_at IS NULL)
+          OR (COALESCE(r.intent->>'kind',r.outcome->>'atom_kind')='managed_atom_delete'
+          AND atom.id=r.page_id AND atom.deleted_at IS NOT NULL))`, [children, row.source_incarnation, p.runKey]);
       if (committed.length !== children.length) throw new OperationError('revision_conflict', 'The atom batch is not fully committed.');
       if (p.origin.kind === 'page') {
         const snapshot = await tx.readPageSnapshot(p.origin.locator, { sourceId: row.source_id });
@@ -303,11 +340,14 @@ export async function prepareManagedAtomMutation(engine: BrainEngine, row: Write
         [p.checkpointKey, checkpoint, p.expectedCheckpoint === null ? null : JSON.stringify(p.expectedCheckpoint)]);
         if (!advanced.length) throw new OperationError('revision_conflict', 'The reviewed atom retry checkpoint changed.');
       }
-      return { status: p.failure ? 'failed' : 'completed', atoms: children.length, ...(p.failure ? { failure: p.failure } : {}) };
+      return { status: p.failure ? 'failed' : 'completed',
+        atoms: committed.filter(child => child.kind === 'managed_atom_page').length,
+        retired: committed.filter(child => child.kind === 'managed_atom_delete').length,
+        ...(p.failure ? { failure: p.failure } : {}) };
     } };
   }
   await authorizeWrite(engine, row.authority, 'put_page', row.slug);
-  const prepared = await preparePageMutation(engine, { ...row, operation: 'put_page' }, config);
+  const prepared = await preparePageMutation(engine, { ...row, operation: 'put_page' }, config, undefined, undefined, { allowMissingFile: true });
   return { ...prepared, additionalPageKeys, validate: async tx => { await validate(tx); await authorizeWrite(tx, row.authority, 'put_page', row.slug); await prepared.validate?.(tx); }, apply: async tx => {
     const result = await prepared.apply(tx);
     if (p.links?.length) await tx.addLinksBatch(p.links, { auditSite: 'cycle.extract_atoms.provenance' });

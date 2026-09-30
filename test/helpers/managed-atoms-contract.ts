@@ -1,5 +1,5 @@
 import { expect } from 'bun:test';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrainEngine } from '../../src/core/engine.ts';
@@ -224,6 +224,76 @@ export async function exerciseManagedAtoms(engine: BrainEngine, scenario: Case):
   } finally { await disposePersistenceConsumer(engine); await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1'); __setChatTransportForTests(null); rmSync(home, { recursive: true, force: true }); }
 }
 
+export async function exerciseManagedAtomReconciliation(engine: BrainEngine): Promise<void> {
+  const home = mkdtempSync(join(tmpdir(), 'gbrain-managed-atom-reconcile-'));
+  const root = join(home, 'repo');
+  const sourceId = 'managed-atom-reconcile';
+  const slug = 'notes/example';
+  try {
+    await withEnv({ GBRAIN_HOME: home }, async () => {
+      await engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', [sourceId, root]);
+      const writeSource = async (revision: number) => {
+        const page = await engine.putPage(slug, { type: 'source', title: 'Example', compiled_truth: `A careful project record at revision ${revision}. `.repeat(40) }, { sourceId });
+        mkdirSync(join(root, 'notes'), { recursive: true });
+        writeFileSync(join(root, `${slug}.md`), serializePageToMarkdown(page, []));
+        return page;
+      };
+      let page = await writeSource(1);
+      await registerLocalWriter(engine, 'cli');
+      await claimWorktree(engine, sourceId, root);
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+      let titles = ['Patience compounds', 'Hire slowly'];
+      let calls = 0;
+      const chat = async (): Promise<ChatResult> => {
+        calls++;
+        return {
+          text: JSON.stringify(titles.map(title => ({ title, atom_type: 'insight', body: `Body for ${title}.` }))),
+          blocks: [], stopReason: 'end',
+          usage: { input_tokens: 10, output_tokens: 10, cache_read_tokens: 0, cache_creation_tokens: 0 },
+          model: 'anthropic:claude-haiku-4-5', providerId: 'anthropic',
+        };
+      };
+      const extract = () => runPhaseExtractAtoms(engine, { sourceId, _transcripts: [],
+        _pages: [{ slug, content: page.compiled_truth, contentHash: page.content_hash! }], _chat: chat });
+      expect((await extract()).status).toBe('ok');
+      const first = await engine.executeRaw<{ slug: string }>("SELECT slug FROM pages WHERE source_id=$1 AND type='atom' AND deleted_at IS NULL ORDER BY slug", [sourceId]);
+      expect(first).toHaveLength(2);
+      const retired = first.find(atom => atom.slug.includes('/patience-compounds-'))!;
+      for (const atom of first) {
+        const path = join(root, `${atom.slug}.md`);
+        expect(existsSync(path)).toBe(true);
+        rmSync(path);
+      }
+      writeFileSync(join(root, `${retired.slug}.md`), 'Uncoordinated operator content.');
+
+      await disposePersistenceConsumer(engine);
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+      page = await writeSource(2);
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+      titles = ['Patience compounds over years', 'Hire slowly'];
+      const failed = await extract();
+      expect(failed.status).toBe('warn');
+      expect(calls).toBe(2);
+      const completion = (failed.details?.write_requests as Array<{ request_id: string }>).at(-1)!;
+      rmSync(join(root, `${retired.slug}.md`));
+      await disposePersistenceConsumer(engine);
+      expect(await retryManagedAtomBatch(engine, sourceId, completion.request_id, 'reviewed-retirement')).toMatchObject({ status: 'completed', model_rerun: false });
+      expect(calls).toBe(2);
+
+      const second = await engine.executeRaw<{ slug: string }>("SELECT slug FROM pages WHERE source_id=$1 AND type='atom' AND deleted_at IS NULL ORDER BY slug", [sourceId]);
+      expect(second).toHaveLength(2);
+      for (const atom of second) expect(existsSync(join(root, `${atom.slug}.md`))).toBe(true);
+      expect(second.map(atom => atom.slug)).not.toContain(retired.slug);
+      expect(existsSync(join(root, `${retired.slug}.md`))).toBe(false);
+      expect((await engine.getPage(retired.slug, { sourceId, includeDeleted: true }))?.deleted_at).not.toBeNull();
+    });
+  } finally {
+    await disposePersistenceConsumer(engine);
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
 export const atomBatchCases = ['partial_publication', 'missing_after_provenance', 'changed_after_provenance', 'completion_rollback'] as const;
 
 export async function exerciseManagedAtomBatch(engine: BrainEngine, scenario: typeof atomBatchCases[number]): Promise<void> {
@@ -360,7 +430,7 @@ export async function exerciseManagedAtomBatch(engine: BrainEngine, scenario: ty
   }
 }
 
-export const atomAuthorityCases = ['remote_job', 'stdio', 'missing_source', 'archived_source', 'missing_owner', 'inactive_owner', 'foreign_owner', 'revoked_writer', 'source_grant', 'read_only_grant', 'operation_grant', 'slug_grant'] as const;
+export const atomAuthorityCases = ['remote_job', 'stdio', 'missing_source', 'archived_source', 'missing_owner', 'inactive_owner', 'foreign_owner', 'revoked_writer', 'source_grant', 'read_only_grant', 'operation_grant', 'delete_operation_grant', 'slug_grant'] as const;
 
 export async function exerciseManagedAtomAuthority(engine: BrainEngine, scenario: typeof atomAuthorityCases[number]): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), 'gbrain-managed-atom-authority-'));
@@ -372,7 +442,7 @@ export async function exerciseManagedAtomAuthority(engine: BrainEngine, scenario
       await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [sourceId]);
       await engine.putPage('notes/example', { type: 'source', title: 'Example', compiled_truth: 'A project record. '.repeat(40) }, { sourceId });
       const page = (await engine.getPage('notes/example', { sourceId }))!;
-      const grant: LocalGrant = { sourceIds: scenario === 'source_grant' ? ['another-source'] : ['*'], operations: scenario === 'operation_grant' ? ['submit_job'] : null,
+      const grant: LocalGrant = { sourceIds: scenario === 'source_grant' ? ['another-source'] : ['*'], operations: scenario === 'operation_grant' ? ['submit_job'] : scenario === 'delete_operation_grant' ? ['submit_job', 'put_page'] : null,
         scopes: scenario === 'read_only_grant' ? ['read'] : ['read', 'write'], slugPrefixes: scenario === 'slug_grant' ? ['atoms/'] : null };
       const registration = await registerLocalWriter(engine, scenario === 'stdio' ? 'stdio' : 'cli', grant);
       if (scenario.endsWith('_owner')) {
