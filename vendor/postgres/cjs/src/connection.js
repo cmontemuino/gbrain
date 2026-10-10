@@ -179,11 +179,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
         : (query = q, query.active = true, armInflight())
 
       build(q)
+      const mayPipeline = !q.options.onexecute || q.options.onexecute(connection)
       return write(toBuffer(q))
         && !q.describeFirst
         && !q.cursorFn
         && sent.length < max_pipeline
-        && (!q.options.onexecute || q.options.onexecute(connection))
+        && mayPipeline
     } catch (error) {
       // GBrain (#6383), the approach of porsager/postgres#1236: q already has its place in the queue of
       // queries awaiting an answer, but nothing of it was written. The stock catch rejected the connection's
