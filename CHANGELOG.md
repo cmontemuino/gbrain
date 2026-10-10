@@ -10,6 +10,20 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+**A visibility filter fix for remote fact reads.**
+
+This release ships a visibility filter fix for remote fact reads. Reads from the trusted local CLI are unchanged, and nothing needs doing after you upgrade.
+
+### Itemized changes
+
+- A visibility filter fix for remote fact reads (`FactListOpts.excludePrivate`, `TrajectoryOpts.excludePrivate`).
+
+### For contributors
+
+- `test/remote-fact-list-private-provenance.test.ts` covers the fix on PGLite, and on Postgres through `test/e2e/remote-fact-list-private-provenance-postgres.test.ts`.
+
 ## [0.60.149.0] - 2026-10-10
 
 **A keyword search from an MCP or other remote caller that hits a common term now takes about 0.2 s of database time on a 50k-page Postgres brain instead of about 1 s. Full `gbrain doctor` is 1.4–1.6 s faster at 50k on both engines. Import issues about 6% fewer statements per page. Results, doctor output and imported content are unchanged.**
