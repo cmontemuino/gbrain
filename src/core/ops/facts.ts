@@ -284,6 +284,8 @@ const recall: Operation = {
       ctx.remote === false
         ? undefined
         : ['world'] as ('private' | 'world')[];
+    const { resolveExcludePrivatePages } = await import('../search/private-visibility.ts');
+    const excludePrivate = await resolveExcludePrivatePages(ctx.engine, ctx.remote); // #4352: fact and page arms alike
     const eligibility = await resolveReadEligibility(ctx, { minTrust: p.min_trust }); // #5575 floor + quarantine/rederive hiding
 
     type FactRows = Awaited<ReturnType<typeof ctx.engine.listFactsByEntity>>;
@@ -337,7 +339,7 @@ const recall: Operation = {
     const listOpts = {
       activeOnly: !includeExpired,
       limit,
-      visibility,
+      visibility, excludePrivate,
       grep: grep ?? undefined,
       excludeAuditRows: true, eligibility,
     };
@@ -348,7 +350,7 @@ const recall: Operation = {
       // private newest row consume a limit slot and hide an older world row.
       rows = mergeNewest(
         await Promise.all(factSources.map(src =>
-          ctx.engine.listSupersessions(src, { since: since ?? undefined, limit, visibility, eligibility }),
+          ctx.engine.listSupersessions(src, { since: since ?? undefined, limit, visibility, excludePrivate, eligibility }),
         )),
         // v0.46 (#3014): matches the engine's ORDER BY COALESCE(expired_at,
         // valid_until) — ontology supersessions carry valid_until only.
@@ -452,9 +454,7 @@ const recall: Operation = {
       // source was invisible to recall while visible to every sibling read op.
       const searchScope = { ...federatedSearchScope(ctx, sourceIdParam), ...(eligibility.floor ? { minTrust: eligibility.floor } : {}) };
       // #4352 — recall's page-search arm enforces `visibility: private` for
-      // untrusted callers (matches the facts arms' world-only filter above).
-      const { resolveExcludePrivatePages } = await import('../search/private-visibility.ts');
-      const excludePrivate = await resolveExcludePrivatePages(ctx.engine, ctx.remote);
+      // untrusted callers with the excludePrivate resolved above.
       const keywordOnly = await recallKeywordOnlyReason(ctx);
       if (keywordOnly) {
         searchResults = await keylessRecallRows(ctx, queryText, limit, excludePrivate, searchScope);
