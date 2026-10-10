@@ -209,10 +209,7 @@ export class PostgresEngine implements BrainEngine {
   private readonly onPoisoned = (pool: 'read' | 'direct', status: string) => this.poisonedDiscards.record(pool, status);
   /** #6383: stuck-connection retirements and build failures, per engine, with their warn lines. */
   private poolIncidents = new PoolIncidentCounter();
-  private readonly poolHealth = (pool: 'read' | 'direct') => ({
-    onstuck: (info: db.StuckConnectionInfo) => this.poolIncidents.recordStuck(pool, info),
-    onbuilderror: (code: string, statement: string) => this.poolIncidents.recordBuildFailure(pool, code, statement),
-  });
+  private readonly poolHealth = (pool: 'read' | 'direct') => this.poolIncidents.hooks(pool);
   /**
    * #1471: module-singleton OWNERSHIP token. `true` only for the engine whose
    * connect() actually created the shared db.ts `sql` singleton (returned

@@ -10,18 +10,14 @@
  * while an earlier deep probe is still pending, and 200 with the pool block
  * otherwise.
  */
-import { afterEach, describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 import { gucMilliseconds, poolHealthOptions, resolveInflightTimeoutSeconds } from '../src/core/db.ts';
+import { withEnv } from './helpers/with-env.ts';
 import { formatBuildFailureWarning, formatStuckConnectionWarning, PoolIncidentCounter } from '../src/core/pool-gauge.ts';
 import { driverPoolStats, poolHealthSnapshot } from '../src/core/postgres-engine/pool-stats.ts';
 import { formatPoolRecoveredInfo, formatPoolStalledWarning, PoolStallWatch } from '../src/core/postgres-engine/pool-stall-watch.ts';
 import { probeDeepHealth } from '../src/commands/serve-http-metrics.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
-
-const previousGrace = process.env.GBRAIN_PG_STUCK_GRACE_MS;
-afterEach(() => {
-  if (previousGrace === undefined) delete process.env.GBRAIN_PG_STUCK_GRACE_MS; else process.env.GBRAIN_PG_STUCK_GRACE_MS = previousGrace;
-});
 
 describe('in-flight budget', () => {
   test('gucMilliseconds reads every statement_timeout unit and treats a bare number as milliseconds', () => {
@@ -35,33 +31,32 @@ describe('in-flight budget', () => {
     expect(gucMilliseconds('soon')).toBeNull();
   });
 
-  test('resolveInflightTimeoutSeconds is statement_timeout plus a 30 s default grace, in whole seconds', () => {
-    delete process.env.GBRAIN_PG_STUCK_GRACE_MS;
-    expect(resolveInflightTimeoutSeconds('5min')).toBe(330);
-    expect(resolveInflightTimeoutSeconds('1800000')).toBe(1830);
-    process.env.GBRAIN_PG_STUCK_GRACE_MS = '500';
-    expect(resolveInflightTimeoutSeconds('500ms')).toBe(1);
+  test('resolveInflightTimeoutSeconds is statement_timeout plus a 30 s default grace, in whole seconds', async () => {
+    await withEnv({ GBRAIN_PG_STUCK_GRACE_MS: undefined }, async () => {
+      expect(resolveInflightTimeoutSeconds('5min')).toBe(330);
+      expect(resolveInflightTimeoutSeconds('1800000')).toBe(1830);
+    });
+    await withEnv({ GBRAIN_PG_STUCK_GRACE_MS: '500' }, async () => {
+      expect(resolveInflightTimeoutSeconds('500ms')).toBe(1);
+    });
   });
 
-  test('the watchdog is off without a statement timeout and with grace 0 or off', () => {
-    delete process.env.GBRAIN_PG_STUCK_GRACE_MS;
-    expect(resolveInflightTimeoutSeconds(undefined)).toBeNull();
-    process.env.GBRAIN_PG_STUCK_GRACE_MS = '0';
-    expect(resolveInflightTimeoutSeconds('5min')).toBeNull();
-    process.env.GBRAIN_PG_STUCK_GRACE_MS = 'off';
-    expect(resolveInflightTimeoutSeconds('5min')).toBeNull();
-    process.env.GBRAIN_PG_STUCK_GRACE_MS = 'nonsense';
-    expect(resolveInflightTimeoutSeconds('5min')).toBe(330);
+  test('the watchdog is off without a statement timeout and with grace 0 or off', async () => {
+    await withEnv({ GBRAIN_PG_STUCK_GRACE_MS: undefined }, async () => { expect(resolveInflightTimeoutSeconds(undefined)).toBeNull(); });
+    await withEnv({ GBRAIN_PG_STUCK_GRACE_MS: '0' }, async () => { expect(resolveInflightTimeoutSeconds('5min')).toBeNull(); });
+    await withEnv({ GBRAIN_PG_STUCK_GRACE_MS: 'off' }, async () => { expect(resolveInflightTimeoutSeconds('5min')).toBeNull(); });
+    await withEnv({ GBRAIN_PG_STUCK_GRACE_MS: 'nonsense' }, async () => { expect(resolveInflightTimeoutSeconds('5min')).toBe(330); });
   });
 
-  test('poolHealthOptions carries the hooks and the budget into postgres.js options', () => {
-    delete process.env.GBRAIN_PG_STUCK_GRACE_MS;
-    const onstuck = () => {};
-    const options = poolHealthOptions({ onstuck }, '5min');
-    expect(options.onstuck).toBe(onstuck);
-    expect(options.onpoisoned).toBeUndefined();
-    expect(options.inflight_timeout).toBe(330);
-    expect(poolHealthOptions(undefined, undefined).inflight_timeout).toBeNull();
+  test('poolHealthOptions carries the hooks and the budget into postgres.js options', async () => {
+    await withEnv({ GBRAIN_PG_STUCK_GRACE_MS: undefined }, async () => {
+      const onstuck = () => {};
+      const options = poolHealthOptions({ onstuck }, '5min');
+      expect(options.onstuck).toBe(onstuck);
+      expect(options.onpoisoned).toBeUndefined();
+      expect(options.inflight_timeout).toBe(330);
+      expect(poolHealthOptions(undefined, undefined).inflight_timeout).toBeNull();
+    });
   });
 });
 

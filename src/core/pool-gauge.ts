@@ -112,6 +112,11 @@ export class PoolIncidentCounter {
     return this.buildFailures;
   }
 
+  /** The driver hooks of one pool, bound to this counter (what an engine passes as `PoolHealthHooks`). */
+  hooks(pool: 'read' | 'direct'): { onstuck: (info: { age_ms: number; queued: number; statement: string }) => void; onbuilderror: (code: string, statement: string) => void } {
+    return { onstuck: (info) => this.recordStuck(pool, info), onbuilderror: (code, statement) => this.recordBuildFailure(pool, code, statement) };
+  }
+
   recordStuck(pool: 'read' | 'direct', info: { age_ms: number; queued: number; statement: string }): void {
     this.stuck += 1;
     try { console.warn(formatStuckConnectionWarning(pool, info)); } catch { /* best-effort */ }
