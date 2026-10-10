@@ -37,6 +37,23 @@ must settle or retire the connection before another query can own it. This
 is necessary for worker admission, query timeout and lease-release safety.
 See issues #5466 and #5560 and `test/e2e/persistence-chaos.test.ts`.
 
+A statement is built and serialized before it joins a connection's queue
+(#6383). Stock postgres.js enqueues first, so a statement that fails to build
+(`UNDEFINED_VALUE`, `MAX_PARAMETERS_EXCEEDED`) behind an in-flight statement
+rejects that head statement with its error, stays queued with nothing on the
+wire, and every later reply on the socket is delivered one statement late until
+the process restarts; with the patch only the culprit rejects, reported through
+`onbuilderror(code, statement)` (template text with `$n` placeholders, no
+values). The same patch adds the in-flight watchdog: `inflight_timeout`
+(seconds) bounds how long a head statement may wait with nothing coming back;
+past it the statement and its queued followers reject with `CONNECTION_STUCK`,
+the pool parks the connection out of rotation, reports `onstuck({ age_ms,
+queued, statement })` and reconnects. `sql.pool` is a live property getter
+(stock `Object.assign` froze the #6317 numbers at construction) and carries
+`inflight_oldest_ms` and `completed`. Tests:
+`test/e2e/postgres-pipelined-build-failure-postgres.test.ts`,
+`test/e2e/postgres-stuck-connection-postgres.test.ts`.
+
 The patch also lets a pool share the parameter types of a described statement
 across its connections (`shared_types`, on by default; GBrain turns it off with
 `GBRAIN_PG_TYPE_CACHE=0`). Stock postgres.js describes every parameterized

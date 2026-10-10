@@ -49,7 +49,7 @@ const errorFields = {
   82  : 'routine'            // R
 }
 
-function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose = noop } = {}) {
+function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose = noop, onstuck = noop } = {}) {
   const {
     sslnegotiation,
     ssl,
@@ -75,6 +75,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
       , idleTimer = timer(end, options.idle_timeout)
       , lifeTimer = timer(end, options.max_lifetime)
       , connectTimer = timer(connectTimedOut, options.connect_timeout)
+      , inflightTimer = timer(inflightTimedOut, options.inflight_timeout)
 
   let socket = null
     , cancelMessage
@@ -108,11 +109,13 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
     , ended = null
     , nonce = null
     , query = null
+    , queryStart = 0
     , final = null
 
   const connection = {
     queue: queues.closed,
     idleTimer,
+    inflightSince: 0,
     connect(query) {
       initial = query
       reconnect()
@@ -168,23 +171,85 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
     if (q.cancelled)
       return
 
+    // GBrain (#6383): a statement is built and serialized before it joins this connection's queue. It used to
+    // join first, so a statement that failed to build (UNDEFINED_VALUE, MAX_PARAMETERS_EXCEEDED) behind an
+    // in-flight one rejected that head statement with its error, stayed queued with nothing on the wire, and
+    // every later reply on the socket was delivered one statement late until the process restarted.
+    let bytes
     try {
       q.state = backend
+      build(q)
+      bytes = toBuffer(q)
+    } catch (error) {
+      if (!query) {
+        // An idle connection owns the ReadyForQuery its Sync produces, exactly as a failed head statement did.
+        query = q
+        query.active = true
+        write(Sync)
+        armInflight()
+      }
+      options.onbuilderror && reportBuildError(q, error)
+      queryError(q, error)
+      return true
+    }
+
+    try {
       query
         ? sent.push(q)
-        : (query = q, query.active = true)
+        : (query = q, query.active = true, armInflight())
 
-      build(q)
       const mayPipeline = !q.options.onexecute || q.options.onexecute(connection)
-      return write(toBuffer(q))
+      return write(bytes)
         && !q.describeFirst
         && !q.cursorFn
         && sent.length < max_pipeline
         && mayPipeline
     } catch (error) {
-      sent.length === 0 && write(Sync)
-      errored(error)
+      if (query === q) {
+        sent.length === 0 && write(Sync)
+        errored(error)
+      } else {
+        sent.remove(q)
+        queryError(q, error)
+      }
       return true
+    }
+  }
+
+  function reportBuildError(q, error) {
+    try {
+      options.onbuilderror(error && error.code ? error.code : 'BUILD_FAILED', statementText(q))
+    } catch (_) {}
+  }
+
+  // The statement's text with $n placeholders, never its parameter values.
+  function statementText(q) {
+    const strings = Array.isArray(q.strings) ? q.strings : [String(q.strings)]
+    return String(q.string || strings.reduce((a, s, i) => a + '$' + i + s)).replace(/\s+/g, ' ').trim().slice(0, 200)
+  }
+
+  // GBrain (#6383): the head statement's clock. It starts when a statement becomes the head, restarts on every
+  // byte the server sends and stops at ReadyForQuery. A statement that outlives options.inflight_timeout with
+  // nothing coming back (a desynced connection, a pooler that swallowed a CancelRequest, a dead peer) has no
+  // server-side timeout left to save it: the connection is retired instead of holding its queue forever.
+  function armInflight() {
+    queryStart = connection.inflightSince = performance.now()
+    inflightTimer.start()
+  }
+
+  function inflightTimedOut() {
+    if (!query)
+      return
+    const stuck = { age_ms: Math.round(performance.now() - queryStart), queued: sent.length, statement: statementText(query) }
+    const s = socket
+    error(Errors.connection('CONNECTION_STUCK', options, socket))
+    query = null
+    connection.inflightSince = 0
+    onstuck(connection, stuck)
+    terminate()
+    if (s && !s.destroyed) {
+      const t = setTimeout(() => s.destroyed || s.destroy(), 1000)
+      t.unref && t.unref()
     }
   }
 
@@ -310,6 +375,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
   }
 
   function data(x) {
+    query && inflightTimer.start()
     if (incomings) {
       incomings.push(x)
       remaining -= x.length
@@ -462,6 +528,8 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
     idleTimer.cancel()
     lifeTimer.cancel()
     connectTimer.cancel()
+    inflightTimer.cancel()
+    connection.inflightSince = 0
 
     socket.removeAllListeners()
     socket = null
@@ -566,7 +634,9 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
 
   function ReadyForQuery(x) {
     connection.status = x[5]
+    connection.inflightSince = 0
     if (query) {
+      options.shared.completed++
       if (errorResponse) {
         // GBrain: a failed statement describes again next time instead of trusting shared parameter types.
         query.sharedTypes && options.shared_types.delete(query.typesKey)
@@ -585,6 +655,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
     query = results = errorResponse = null
     result = new Result()
     connectTimer.cancel()
+    inflightTimer.cancel()
 
     if (initial) {
       if (target_session_attrs) {
@@ -611,7 +682,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
       Connection(options).cancel(query.state, query.cancelled.resolve, query.cancelled.reject)
 
     if (query)
-      return // Consider opening if able and sent.length < 50
+      return armInflight() // Consider opening if able and sent.length < 50
 
     connection.reserved
       ? !connection.reserved.release && x[5] === 73 // I
