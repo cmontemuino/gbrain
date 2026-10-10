@@ -6,11 +6,12 @@
  * raw ts_rank scores, local and with the remote excludePrivate scope), hybrid
  * search with that remote scope, and the search, query (expand: false) and
  * recall operations without an embedding provider, so results come from the
- * keyword and title arms alone. The ranked lists (slug, chunk_id, exact score
- * and a sha256 over the chunk text and title, in order) must equal test/fixtures/keyword-arm-ranking.json, recorded before
- * the Postgres keyword statement planned its full-text match on its own for
- * excludePrivate callers (OFFSET 0 fence): a plan change may never change a
- * row, an order or a score.
+ * keyword and title arms alone. The ranked lists (slug, chunk_id, exact
+ * score and a 16-hex sha256 prefix over the chunk text and title, in order)
+ * must equal test/fixtures/keyword-arm-ranking.json on both engines. It was
+ * recorded before the Postgres keyword statement planned its full-text match
+ * on its own for excludePrivate callers (OFFSET 0 fence): a plan change may
+ * never change a row, an order or a score.
  * Regenerate with KEYWORD_RANKING_WRITE=1 only for an intended ranking change.
  *
  * It also pins how many keyword statements one search runs: one when the
@@ -81,20 +82,39 @@ const QUERIES = [
 
 type Ranked = Array<[string, number | null, number | null, string]>;
 
-const sha256 = (text: string) => new Bun.CryptoHasher('sha256').update(text).digest('hex');
+const sha256Prefix = (text: string) => new Bun.CryptoHasher('sha256').update(text).digest('hex').slice(0, 16);
 
-/** slug, chunk_id, exact score, and one sha256 over the row's text fields (chunk text, title), so the golden stays small. */
+/** slug, chunk_id, exact score, and the first 16 hex of a sha256 over the row's text fields (chunk text, title). */
 function ranked(value: unknown): Ranked {
   const list = Array.isArray(value) ? value : ((value as { results?: unknown[] })?.results ?? []);
   return (list as Array<Record<string, unknown>>).map((row) => [
     String(row.slug),
     typeof row.chunk_id === 'number' ? row.chunk_id : null,
     typeof row.score === 'number' ? row.score : null,
-    sha256(JSON.stringify([row.chunk_text ?? row.chunk ?? null, row.title ?? null])),
+    sha256Prefix(JSON.stringify([row.chunk_text ?? row.chunk ?? null, row.title ?? null])),
   ]);
 }
 
-const golden: Record<string, Record<string, Ranked>> = WRITE ? {} : JSON.parse(readFileSync(GOLDEN, 'utf8'));
+/**
+ * One golden for both engines (they must rank identically). A list equal to an
+ * earlier key's list is stored as `"=<that key>"`.
+ */
+type Golden = Record<string, Ranked | string>;
+const resolve = (g: Golden, key: string): Ranked => {
+  const v = g[key];
+  return typeof v === 'string' ? (g[v.slice(1)] as Ranked) : v!;
+};
+function serialize(lists: Record<string, Ranked>): string {
+  const firstKey = new Map<string, string>();
+  const lines = Object.entries(lists).map(([key, rows]) => {
+    const json = JSON.stringify(rows);
+    const seen = firstKey.get(json);
+    if (!seen) firstKey.set(json, key);
+    return `${JSON.stringify(key)}: ${seen ? JSON.stringify(`=${seen}`) : json}`;
+  });
+  return `{\n${lines.join(',\n')}\n}\n`;
+}
+const golden: Golden = WRITE ? {} : JSON.parse(readFileSync(GOLDEN, 'utf8'));
 
 for (const kind of testBackends()) {
   describe(`keyword arm ranking (${kind})`, () => {
@@ -126,11 +146,11 @@ for (const kind of testBackends()) {
 
     afterAll(async () => {
       if (WRITE) {
-        const all = (() => { try { return JSON.parse(readFileSync(GOLDEN, 'utf8')); } catch { return {}; } })();
-        all[kind] = actual;
-        const lines = Object.entries(all as Record<string, Record<string, Ranked>>).map(([k, rows]) =>
-          `${JSON.stringify(k)}: {\n${Object.entries(rows).map(([key, r]) => `  ${JSON.stringify(key)}: ${JSON.stringify(r)}`).join(',\n')}\n}`);
-        writeFileSync(GOLDEN, `{\n${lines.join(',\n')}\n}\n`);
+        const previous: Golden | null = (() => { try { return JSON.parse(readFileSync(GOLDEN, 'utf8')); } catch { return null; } })();
+        if (previous && Object.keys(actual).some((key) => JSON.stringify(resolve(previous, key)) !== JSON.stringify(actual[key]))) {
+          throw new Error(`${kind} ranks differently from the golden another engine just recorded`);
+        }
+        writeFileSync(GOLDEN, serialize(actual));
       }
       setSystemTime();
       await close?.();
@@ -151,14 +171,14 @@ for (const kind of testBackends()) {
         for (const q of QUERIES) {
           const key = `${op}:${q}`;
           actual[key] = ranked(await run(q));
-          if (!WRITE) expect({ key, ranked: actual[key] }).toEqual({ key, ranked: golden[kind]![key]! });
+          if (!WRITE) expect({ key, ranked: actual[key] }).toEqual({ key, ranked: resolve(golden, key) });
         }
       }, 120_000);
     }
 
     test('the fixture exercises strict hits, a common term and the OR fallback', () => {
       if (WRITE) return;
-      const search = (q: string) => golden[kind]![`search:${q}`]!;
+      const search = (q: string) => resolve(golden, `search:${q}`);
       expect(search(COMMON).length).toBe(10);
       expect(search(phrase(3, 0)).length).toBeGreaterThan(0);
       expect(search('what did we decide about vindre and talquo').length).toBeGreaterThan(0);
