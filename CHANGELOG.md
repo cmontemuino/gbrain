@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.148.0] - 2026-10-10
+## [0.60.150.0] - 2026-10-10
 
 **On Postgres, one statement with an `undefined` parameter could wedge a pooled connection for good: the statement in flight ahead of it got its error, it stayed queued with nothing on the wire, every later reply arrived one statement late, and the backend sat `active / ClientRead` while `/health` answered 200 (#6383, the driver desync behind #6352). The vendored driver now builds a statement before it joins the queue, so only the culprit fails; a connection whose statement waits past `statement_timeout` plus 30 s with nothing coming back is retired and replaced; the pool numbers are live; and `/health?deep=1` probes through the same pool the handlers use.**
 
