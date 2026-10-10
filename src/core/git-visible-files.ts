@@ -34,12 +34,14 @@ export function invalidateGitListingCache(): void {
 
 /** True when the current scope already saw git report `dir` outside any repository. */
 export function knownOutsideGitRepo(dir: string): boolean {
+  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- resolve() only normalizes a memo key for a directory git already ran in; nothing is read or written at the path
   return gitScope.getStore()?.outside.has(resolve(dir)) ?? false;
 }
 
 /** Record a failed git command run in `dir`: its stderr saying "not a git repository" is remembered for the current scope. */
 export function noteGitFailure(dir: string, error: unknown): void {
   const stderr = (error as { stderr?: unknown } | null)?.stderr;
+  // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- resolve() only normalizes a memo key for a directory git already ran in; nothing is read or written at the path
   if (/not a git repository/i.test(String(stderr ?? ''))) gitScope.getStore()?.outside.add(resolve(dir));
 }
 
