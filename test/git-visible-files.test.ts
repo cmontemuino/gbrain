@@ -201,13 +201,16 @@ describe('withGitListingCache — doctor-scoped ls-files memo (GBRA-68)', () => 
     });
   });
 
-  test('a failed listing is cached as null inside the scope', async () => {
+  // GBRA-75 wave 10: the outside-repo verdict is memoized only until a `.git` appears, so a repository created
+  // inside the scope is listed by the next call (test/git-listing-memo.test.ts covers the spawn count).
+  test('a failed listing is not reused inside the scope once a repository appears', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'gbrain-f6-cache-nogit-'));
     cleanups.push(dir);
     await withGitListingCache(async () => {
       expect(collectGitVisibleFiles(dir, md)).toBeNull();
-      git(dir, ['init', '-q', '-b', 'main']);
       expect(collectGitVisibleFiles(dir, md)).toBeNull();
+      git(dir, ['init', '-q', '-b', 'main']);
+      expect(collectGitVisibleFiles(dir, md)).toEqual([]);
     });
     expect(collectGitVisibleFiles(dir, md)).toEqual([]);
   });
