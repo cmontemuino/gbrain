@@ -10,6 +10,19 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.60.148.0] - 2026-10-10
+
+**The nightly E2E and Heavy Tests runs are green again.**
+
+Both failures came from this week's migrations meeting older tests, and gbrain itself behaves the same.
+
+- **E2E:** v225 drops `idx_chunks_embedding_null`, a duplicate of `content_chunks_stale_idx`. The invalid-index recovery test replays v66, which re-creates that index on a brain already at the latest version, and left it behind. The nightly shard runs files one after another on one database without replaying migrations, so `embed-stale-pagination`, several files later, found the duplicate. The recovery test now runs v225 again when it finishes, putting the schema back where the latest version leaves it.
+- **Heavy:** the Postgres upgrade test builds a pre-v0.18 brain by dropping `pages.source_id` from a current one. v230's trust-generation triggers depend on that column, so the drop failed. The fixture now drops those triggers first; the walk forward re-creates them when v230 runs again (checked: every trigger is back at the latest version).
+
+## To take advantage of v0.60.148.0
+
+`gbrain upgrade` installs the binary. There are no schema migrations.
+
 ## [0.60.147.0] - 2026-10-10
 
 **A write that arrives while a brain folder with the Git durability hook is committing a backlog of Git effects now publishes after the group in flight, inside its 5 s wait. Before, it waited out the whole backlog and came back pending. On Postgres, a first sync of an already-imported source now issues 40 statements per unchanged file instead of 82.**
