@@ -10,7 +10,7 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
-## [0.60.148.0] - 2026-10-10
+## [0.60.149.0] - 2026-10-10
 
 **A keyword search from an MCP or other remote caller that hits a common term now takes about 0.2 s of database time on a 50k-page Postgres brain instead of about 1 s. Full `gbrain doctor` is 1.4–1.6 s faster at 50k on both engines. Import issues about 6% fewer statements per page. Results, doctor output and imported content are unchanged.**
 
@@ -53,6 +53,19 @@ Import wall time is flat (Postgres 180.5 → 177.0 s, PGLite 149.1 → 148.8 s);
   - **DST census:** the new case in `fence-census.test.ts` fails on base.
   - **Import reads:** `import-reads.test.ts` and its Postgres arm check batch-versus-single parity, including soft-deleted pages, withdrawals, global purges and quoted ids. Normalized table hashes of a 5k import match base on both engines, with and without tombstones.
   - **Crash robot:** 600 s on each engine, with PgBouncer and `pooler_disconnect` on Postgres.
+
+## [0.60.148.0] - 2026-10-10
+
+**The nightly E2E and Heavy Tests runs are green again.**
+
+Both failures came from this week's migrations meeting older tests, and gbrain itself behaves the same.
+
+- **E2E:** v225 drops `idx_chunks_embedding_null`, a duplicate of `content_chunks_stale_idx`. The invalid-index recovery test replays v66, which re-creates that index on a brain already at the latest version, and left it behind. The nightly shard runs files one after another on one database without replaying migrations, so `embed-stale-pagination`, several files later, found the duplicate. The recovery test now runs v225 again when it finishes, putting the schema back where the latest version leaves it.
+- **Heavy:** the Postgres upgrade test builds a pre-v0.18 brain by dropping `pages.source_id` from a current one. v230's trust-generation triggers depend on that column, so the drop failed. The fixture now drops those triggers first; the walk forward re-creates them when v230 runs again (checked: every trigger is back at the latest version).
+
+## To take advantage of v0.60.148.0
+
+`gbrain upgrade` installs the binary. There are no schema migrations.
 
 ## [0.60.147.0] - 2026-10-10
 
