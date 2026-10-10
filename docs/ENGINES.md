@@ -723,8 +723,9 @@ with the operations that preceded them.
 <a id="pg-statement-build-failed"></a>**`pg_statement_build_failed`** (warn). A
 statement could not be built from its parameters (`error=UNDEFINED_VALUE`: a
 parameter was `undefined`; `error=MAX_PARAMETERS_EXCEEDED`: more than 65534
-parameters) and was rejected before it reached the connection. No other
-statement was affected: before #6383 the same failure, when the statement was
+parameters). It was answered in its place in the pipeline by a query the server
+refuses, so only it failed and a transaction it was part of was aborted rather
+than committed without it. No other statement was affected: before #6383 the same failure, when the statement was
 pipelined behind another on its connection, rejected that other statement with
 its error, left the culprit queued with nothing on the wire, and delivered every
 later reply one statement late until the process restarted (the

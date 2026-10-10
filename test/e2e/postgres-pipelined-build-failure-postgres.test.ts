@@ -1,20 +1,30 @@
 /**
  * #6383 (and the driver desync behind #6352): a statement that fails to build
- * (`UNDEFINED_VALUE`, `MAX_PARAMETERS_EXCEEDED`) used to join the connection's
- * queue before it was built, so when another statement was already in flight
- * the failure rejected that head statement with the wrong error, left the
- * culprit queued with nothing on the wire, and every later reply on the socket
- * was delivered one statement late. A describe-first statement then never got
- * its ParameterDescription, so its Bind/Execute/Sync was never sent and the
+ * (`UNDEFINED_VALUE`, `MAX_PARAMETERS_EXCEEDED`) joins the connection's queue
+ * before it is built, and nothing of it reaches the wire. The stock catch
+ * rejected the connection's current statement with the culprit's error and
+ * left the culprit queued, so every later reply on the socket was delivered
+ * one statement late. A describe-first statement then never got its
+ * ParameterDescription, so its Bind/Execute/Sync was never sent and the
  * backend sat `active / ClientRead` until the process restarted.
  *
+ * The vendored fix follows porsager/postgres#1236: a query the server is sure
+ * to refuse goes out in the culprit's place, so the culprit gets an answer of
+ * its own (and rejects with its own error), every later reply stays with its
+ * statement, and a transaction the culprit was part of is aborted by the
+ * server instead of committing without it.
+ *
  * Protects: only the culprit rejects, with its own error; the head and every
- * later statement resolve with their own rows; the backend returns to idle; a
- * transaction with a bad member rolls back cleanly; the pool reports each
- * build failure through `onbuilderror` with the statement's text and no
- * parameter values. Regression that fails it on master: `next` and `later`
- * never settle (the 5 s race below reports `hung`), and the backend stays
- * `active`.
+ * later statement outside a transaction resolve with their own rows; the
+ * backend returns to idle; a `sql.begin` with a bad member rolls back; a
+ * pipelined `begin … commit` on a reserved connection with a bad member
+ * commits nothing (the member behind it is refused with `25P02` and the
+ * `commit` lands as `ROLLBACK`); the pool reports each build failure through
+ * `onbuilderror` with the statement's text and no parameter values.
+ * Regression that fails it on master: `next` and `later` never settle (the
+ * 5 s race below reports `hung`), and the backend stays `active`. A fix that
+ * only drops the culprit from the pipeline fails the reserved-transaction
+ * case: both inserts commit.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createRequire } from 'node:module';
@@ -88,17 +98,55 @@ describe.skipIf(!url)('#6383 a statement that fails to build never desyncs its c
     expect(builds.map(b => b[0])).toEqual(['UNDEFINED_VALUE', 'UNDEFINED_VALUE']);
   });
 
-  test('a transaction with a bad member rolls back and the backend is idle, not left in the transaction', async () => {
+  test('a sql.begin with a bad member rolls back: the member behind it is refused, nothing commits, the backend is idle', async () => {
     const builds: Array<[string, string]> = [];
     const { sql, appName } = pool(1, builds);
-    const tx = await settle(sql.begin(async tx => Promise.allSettled([
-      tx`SELECT 1 AS a`,
-      tx`SELECT ${undefined as unknown as string}::text`,
-      tx`SELECT 2 AS b, ${3}::int AS c`,
-    ])));
-    expect(tx).toEqual({ code: 'UNDEFINED_VALUE' });
-    expect(await settle(sql`SELECT 'after' AS who`)).toEqual({ rows: [{ who: 'after' }] });
-    expect(await backendStates(appName)).toEqual(['idle']);
+    const table = `t6383_${Math.random().toString(36).slice(2)}`;
+    await sql.unsafe(`CREATE TABLE ${table} (x int)`);
+    try {
+      const members: Settled[] = [];
+      const tx = await settle(sql.begin(async tx => {
+        const settled = await Promise.all([
+          settle(tx.unsafe(`INSERT INTO ${table} VALUES (1)`)),
+          settle(tx`SELECT ${undefined as unknown as string}::text`),
+          settle(tx.unsafe(`INSERT INTO ${table} VALUES (2)`)),
+        ]);
+        members.push(...settled);
+      }));
+      expect(tx).toEqual({ code: 'UNDEFINED_VALUE' });
+      expect(members).toEqual([{ rows: [] }, { code: 'UNDEFINED_VALUE' }, { code: '25P02' }]);
+      expect(await settle(sql.unsafe(`SELECT count(*)::int AS n FROM ${table}`))).toEqual({ rows: [{ n: 0 }] });
+      expect(await backendStates(appName)).toEqual(['idle']);
+    } finally {
+      await sql.unsafe(`DROP TABLE ${table}`);
+    }
+  });
+
+  test('a pipelined begin … commit on a reserved connection with a bad member commits nothing (the porsager/postgres#1236 case)', async () => {
+    const builds: Array<[string, string]> = [];
+    const { sql, appName } = pool(1, builds);
+    const table = `t6383_${Math.random().toString(36).slice(2)}`;
+    await sql.unsafe(`CREATE TABLE ${table} (x int)`);
+    try {
+      const reserved = await sql.reserve();
+      const results = await Promise.all([
+        reserved`begin`,
+        reserved.unsafe(`INSERT INTO ${table} VALUES (1)`),
+        reserved`SELECT ${undefined as unknown as string}::text AS x`,
+        reserved.unsafe(`INSERT INTO ${table} VALUES (2)`),
+        reserved`commit`,
+      ].map(q => Promise.race([
+        Promise.resolve(q).then(r => (r as { command?: string }).command ?? 'rows', (e: { code?: string }) => e.code ?? 'error'),
+        new Promise<string>(resolve => setTimeout(() => resolve('hung'), 5000)),
+      ])));
+      reserved.release();
+      expect(results).toEqual(['BEGIN', 'INSERT', 'UNDEFINED_VALUE', '25P02', 'ROLLBACK']);
+      expect(await settle(sql.unsafe(`SELECT count(*)::int AS n FROM ${table}`))).toEqual({ rows: [{ n: 0 }] });
+      expect(await backendStates(appName)).toEqual(['idle']);
+      expect(builds).toEqual([['UNDEFINED_VALUE', 'SELECT $1::text AS x']]);
+    } finally {
+      await sql.unsafe(`DROP TABLE ${table}`);
+    }
   });
 
   test('MAX_PARAMETERS_EXCEEDED behind a head statement is rejected alone too', async () => {

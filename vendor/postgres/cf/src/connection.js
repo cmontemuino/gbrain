@@ -22,6 +22,7 @@ const Sync = b().S().end()
     , SSLRequest = b().i32(8).i32(80877103).end(8)
     , ExecuteUnnamed = Buffer.concat([b().E().str(b.N).i32(0).end(), Sync])
     , DescribeUnnamed = b().D().str('S').str(b.N).end()
+    , Unbuildable = b().Q().str('postgres.js: query could not be built' + b.N).end()
     , noop = () => { /* noop */ }
 
 const retryRoutines = new Set([
@@ -173,47 +174,32 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
     if (q.cancelled)
       return
 
-    // GBrain (#6383): a statement is built and serialized before it joins this connection's queue. It used to
-    // join first, so a statement that failed to build (UNDEFINED_VALUE, MAX_PARAMETERS_EXCEEDED) behind an
-    // in-flight one rejected that head statement with its error, stayed queued with nothing on the wire, and
-    // every later reply on the socket was delivered one statement late until the process restarted.
-    let bytes
     try {
       q.state = backend
-      build(q)
-      bytes = toBuffer(q)
-    } catch (error) {
-      if (!query) {
-        // An idle connection owns the ReadyForQuery its Sync produces, exactly as a failed head statement did.
-        query = q
-        query.active = true
-        write(Sync)
-        armInflight()
-      }
-      options.onbuilderror && reportBuildError(q, error)
-      queryError(q, error)
-      return true
-    }
-
-    try {
       query
         ? sent.push(q)
         : (query = q, query.active = true, armInflight())
 
-      const mayPipeline = !q.options.onexecute || q.options.onexecute(connection)
-      return write(bytes)
+      build(q)
+      return write(toBuffer(q))
         && !q.describeFirst
         && !q.cursorFn
         && sent.length < max_pipeline
-        && mayPipeline
+        && (!q.options.onexecute || q.options.onexecute(connection))
     } catch (error) {
-      if (query === q) {
-        sent.length === 0 && write(Sync)
-        errored(error)
-      } else {
-        sent.remove(q)
-        queryError(q, error)
-      }
+      // GBrain (#6383), the approach of porsager/postgres#1236: q already has its place in the queue of
+      // queries awaiting an answer, but nothing of it was written. The stock catch rejected the connection's
+      // current query with q's error and left q waiting, so every later answer went to the wrong query.
+      // Send a query the server is sure to refuse in q's place: q gets an answer of its own, every later
+      // answer stays with its query, and a transaction q was part of is aborted instead of committing
+      // without it. q is then rejected with its own error, as a retried query is (ReadyForQuery). It is no
+      // longer described first or a cursor, since either would make the server's error send a Sync of its
+      // own and shift the next answer.
+      q.retried = error
+      q.describeFirst = false
+      q.cursorFn = null
+      options.onbuilderror && reportBuildError(q, error)
+      write(Unbuildable)
       return true
     }
   }

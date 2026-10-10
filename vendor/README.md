@@ -37,12 +37,17 @@ must settle or retire the connection before another query can own it. This
 is necessary for worker admission, query timeout and lease-release safety.
 See issues #5466 and #5560 and `test/e2e/persistence-chaos.test.ts`.
 
-A statement is built and serialized before it joins a connection's queue
-(#6383). Stock postgres.js enqueues first, so a statement that fails to build
-(`UNDEFINED_VALUE`, `MAX_PARAMETERS_EXCEEDED`) behind an in-flight statement
-rejects that head statement with its error, stays queued with nothing on the
-wire, and every later reply on the socket is delivered one statement late until
-the process restarts; with the patch only the culprit rejects, reported through
+A statement that fails to build is answered in its place in the pipeline
+(#6383; the approach of upstream PR porsager/postgres#1236, which fixes
+porsager/postgres#1082, so this hunk drops when that merges). A statement joins
+a connection's queue before it is built, so when `build` throws
+(`UNDEFINED_VALUE`, `MAX_PARAMETERS_EXCEEDED`) behind an in-flight statement,
+stock postgres.js rejects that head statement with its error, leaves the
+culprit queued with nothing on the wire, and delivers every later reply on the
+socket one statement late until the process restarts. With the patch a query
+the server is certain to refuse goes out in the culprit's place: only the
+culprit rejects, with its own error, a transaction it was part of is aborted
+rather than committed without it, and the pool reports the failure through
 `onbuilderror(code, statement)` (template text with `$n` placeholders, no
 values). The same patch adds the in-flight watchdog: `inflight_timeout`
 (seconds) bounds how long a head statement may wait with nothing coming back;
