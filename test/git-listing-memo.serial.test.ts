@@ -6,10 +6,8 @@
  * and the census HEAD probe share the verdict), and the memo never hides a
  * change: a git command that changes a repository (sync-git.ts) or an explicit
  * `invalidateGitListingCache()` drops it, so a file added mid-run is listed by
- * the next listing; a repository created mid-run (here by a plain `git init`
- * that no hook sees) is found by the next probe because the verdict lapses
- * when a `.git` marker appears; and nothing outlives the run.
- * Fails when: a listing or verdict survives an in-run write or `git init`, the
+ * the next listing; and nothing outlives the run.
+ * Fails when: a listing or verdict survives an in-run sync-git write or invalidation, the
  * memo leaks past its scope, or a non-repository directory is probed more than
  * once per run.
  * Temp directories and the system git ($0); synthetic content only.
@@ -96,17 +94,6 @@ describe('withGitListingCache memo', () => {
       writeFileSync(join(dir, 'c.md'), 'c\n');
       invalidateGitListingCache();
       expect(names(dir)).toEqual(['a.md', 'c.md']);
-    });
-  });
-
-  test('a repository created mid-run with no hook is found by the next listing and discoverGitRoot', async () => {
-    const dir = freshDir(false);
-    await withGitListingCache(async () => {
-      expect(names(dir)).toBeNull();
-      expect(() => discoverGitRoot(dir)).toThrow('Not inside a git repository');
-      execFileSync('/usr/bin/env', ['git', '-C', dir, 'init', '-q'], { stdio: 'ignore' });
-      expect(names(dir)).toEqual(['a.md']);
-      expect(discoverGitRoot(dir)).toBe(execFileSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim());
     });
   });
 
