@@ -14,10 +14,9 @@
 import { afterAll, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { defineNormalizer, expectGolden, expectNormalizerStable } from './helpers/golden.ts';
 import { doctorJsonNormalizer, makeDoctorHome, networkAttempts, runGbrain, type DoctorHome, type GbrainRun } from './helpers/doctor-json-golden.ts';
-import { buildHotCheckFixture, editHotCheckFixture, type Sql } from './helpers/doctor-hot-checks-fixture.ts';
+import { buildHotCheckFixture, editHotCheckFixture, pgliteSql } from './helpers/doctor-hot-checks-fixture.ts';
 
 const DOCTOR = doctorJsonNormalizer();
 const homes: DoctorHome[] = [];
@@ -34,15 +33,7 @@ async function capture(): Promise<Captures> {
   const init = await runGbrain(h, ['init', '--pglite', '--no-embedding']);
   if (init.exitCode !== 0) throw new Error(`gbrain init failed (${init.exitCode}): ${init.stderr}`);
   const { database_path } = JSON.parse(readFileSync(join(h.home, '.gbrain', 'config.json'), 'utf8')) as { database_path: string };
-  const sql: Sql = async (statements) => {
-    const engine = new PGLiteEngine();
-    await engine.connect({ database_path });
-    try {
-      await engine.transaction(async (tx) => { for (const [q, p] of statements) await tx.executeRaw(q, p); });
-    } finally {
-      await engine.disconnect();
-    }
-  };
+  const sql = pgliteSql(database_path);
   await buildHotCheckFixture(h, sql);
   const first = await runGbrain(h, ['doctor', '--json', '--skills-dir', h.skillsDir]);
   await editHotCheckFixture(h, sql);

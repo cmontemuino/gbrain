@@ -12,10 +12,24 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import { runGbrain, type DoctorHome, type GbrainRun } from './doctor-json-golden.ts';
 
 /** Runs the statements in one transaction against the brain's database (the CLI holds no connection between calls). */
 export type Sql = (statements: Array<[string, unknown[]]>) => Promise<void>;
+
+/** `Sql` for a PGLite brain on disk: opens it for one transaction while no CLI process holds it. */
+export function pgliteSql(databasePath: string): Sql {
+  return async (statements) => {
+    const engine = new PGLiteEngine();
+    await engine.connect({ database_path: databasePath });
+    try {
+      await engine.transaction(async (tx) => { for (const [q, p] of statements) await tx.executeRaw(q, p); });
+    } finally {
+      await engine.disconnect();
+    }
+  };
+}
 
 const FB = '<!--- gbrain:facts:begin -->', FE = '<!--- gbrain:facts:end -->';
 const FH = '| # | claim | kind | confidence | visibility | notability | valid_from | valid_until | source | context |\n|---|---|---|---|---|---|---|---|---|---|';
