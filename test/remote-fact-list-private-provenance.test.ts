@@ -145,9 +145,10 @@ for (const kind of testBackends()) {
       }
     });
 
-    test('delta facts arm: include_private local unchanged, remote hides private-provenance facts', async () => {
+    test('delta facts arm: include_private local unchanged; remote and the default world posture hide private-provenance facts', async () => {
       const del = async (ctx: OperationContext, p: R) => (await operationsByName.delta.handler(ctx, p)) as R;
       expect(markers((await del(local(), { since: seededAt, include_private: true })).facts)).toEqual(ACTIVE_LOCAL);
+      expect(markers((await del(local(), { since: seededAt })).facts)).toEqual(ACTIVE_REMOTE);
       for (const c of untrusted()) {
         expect(markers((await del(c, { since: seededAt })).facts)).toEqual(ACTIVE_REMOTE);
       }
