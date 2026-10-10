@@ -137,6 +137,8 @@ export async function buildHotCheckFixture(h: DoctorHome, sql: Sql): Promise<voi
     [insert, ['notes/timeline-b', '2024-06-02', 'legacy', 'Hidden <!-- markup --> event']],
     // A stored page whose fence is malformed (the file stays clean).
     [`UPDATE pages SET compiled_truth = compiled_truth || $2 WHERE slug = $1 AND source_id = 'notes'`, ['notes/stored-fence', `\n\n## Facts\n\n${DETERMINISTIC_FENCE}`]],
+    // Planner estimates (doctor's "~N request row(s)") are exact, not whatever Postgres autovacuum last sampled.
+    ['ANALYZE', []],
   ]);
   writeAll(src, { ...UNTRACKED, 'fences/untracked.md': `${fm('Untracked Fence')}\n## Facts\n\n${DETERMINISTIC_FENCE}` });
 }
@@ -157,5 +159,6 @@ export async function editHotCheckFixture(h: DoctorHome, sql: Sql): Promise<void
     ["SELECT set_config('gbrain.write_sources', $1, true)", [JSON.stringify(['notes'])]],
     [`INSERT INTO timeline_entries(page_id,date,source,summary,detail)
       SELECT id, '2024-07-01', 'legacy', 'A later database-only event', '' FROM pages WHERE slug = 'companies/acme-example' AND source_id = 'notes'`, []],
+    ['ANALYZE', []],
   ]);
 }

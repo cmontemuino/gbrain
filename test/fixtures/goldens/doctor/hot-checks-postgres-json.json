@@ -849,7 +849,7 @@
             "details": {
               "commands": [],
               "docs": "docs/guides/repair.md#request-growth",
-              "rows": 0,
+              "rows": 22,
               "rows_exact": false,
               "scopes": [
                 {
@@ -878,7 +878,7 @@
               "verify": "gbrain doctor --json (check persistence_request_growth)",
               "window_days": 7
             },
-            "message": "~0 request row(s); no scope exhausts its lifetime request IDs within 90 days at its last-7-day rate.",
+            "message": "~22 request row(s); no scope exhausts its lifetime request IDs within 90 days at its last-7-day rate.",
             "name": "persistence_request_growth",
             "status": "ok"
           },
@@ -3832,7 +3832,7 @@
             "details": {
               "commands": [],
               "docs": "docs/guides/repair.md#request-growth",
-              "rows": 0,
+              "rows": 22,
               "rows_exact": false,
               "scopes": [
                 {
@@ -3861,7 +3861,7 @@
               "verify": "gbrain doctor --json (check persistence_request_growth)",
               "window_days": 7
             },
-            "message": "~0 request row(s); no scope exhausts its lifetime request IDs within 90 days at its last-7-day rate.",
+            "message": "~22 request row(s); no scope exhausts its lifetime request IDs within 90 days at its last-7-day rate.",
             "name": "persistence_request_growth",
             "status": "ok"
           },
